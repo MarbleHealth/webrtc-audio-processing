@@ -212,6 +212,16 @@ mod webrtc {
         meson.arg("setup").arg("--prefix").arg(out_dir().as_os_str());
         meson.arg("--reconfigure");
 
+        // When cross-compiling between Apple Silicon and Intel macOS, meson
+        // otherwise builds for the build machine's arch (because nothing tells
+        // it the target is different) and the resulting objects fail the final
+        // link with "found architecture 'arm64', required architecture 'x86_64'"
+        // (or vice versa). Pass an explicit cross-file in that case.
+        let cross_file = write_macos_cross_file_if_needed()?;
+        if let Some(ref path) = cross_file {
+            meson.arg("--cross-file").arg(path);
+        }
+
         if cfg!(target_os = "macos") {
             let link_args = "['-framework', 'CoreFoundation', '-framework', 'Foundation']";
             meson.arg(format!("-Dc_link_args={}", link_args));
@@ -485,4 +495,42 @@ fn determine_objcopy_path() -> Result<PathBuf> {
     }
 
     Ok(objcopy)
+}
+
+/// Write a meson cross-file to OUT_DIR when cross-compiling between Apple Silicon
+/// and Intel macOS, and return its path. Returns None when no cross-file is
+/// needed (target == host, or non-darwin target). Without this, meson defaults
+/// to the build machine's arch and the resulting objects are rejected by the
+/// linker for the actual target arch — the failure mode that breaks
+/// `cargo build --target universal-apple-darwin` on an arm64 build host.
+fn write_macos_cross_file_if_needed() -> Result<Option<PathBuf>> {
+    let target = env::var("TARGET").unwrap_or_default();
+    let host = env::var("HOST").unwrap_or_default();
+    if target == host {
+        return Ok(None);
+    }
+    let (arch, cpu_family) = match target.as_str() {
+        "x86_64-apple-darwin" => ("x86_64", "x86_64"),
+        "aarch64-apple-darwin" => ("arm64", "aarch64"),
+        // Any other cross-target (e.g. arm64 → linux) is out of scope here;
+        // those paths weren't broken to begin with.
+        _ => return Ok(None),
+    };
+    let cross_file = out_dir().join(format!("meson-cross-{arch}.ini"));
+    let content = format!(
+        "[binaries]\n\
+         c = ['clang', '-arch', '{arch}']\n\
+         cpp = ['clang++', '-arch', '{arch}']\n\
+         ar = 'ar'\n\
+         strip = 'strip'\n\
+         \n\
+         [host_machine]\n\
+         system = 'darwin'\n\
+         cpu_family = '{cpu_family}'\n\
+         cpu = '{arch}'\n\
+         endian = 'little'\n",
+    );
+    std::fs::write(&cross_file, content)
+        .with_context(|| format!("Failed to write meson cross-file at {:?}", cross_file))?;
+    Ok(Some(cross_file))
 }
