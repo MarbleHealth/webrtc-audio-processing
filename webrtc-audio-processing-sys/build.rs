@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use bindgen::callbacks::{AttributeInfo, DeriveInfo, ParseCallbacks};
 use std::{
     env,
@@ -412,8 +412,13 @@ fn main() -> Result<()> {
         .includes(&include_dirs)
         .flag("-std=c++17")
         .flag("-Wno-unused-parameter")
-        .out_dir(out_dir())
-        .compile("webrtc_audio_processing_wrapper");
+        .out_dir(out_dir());
+
+    // Inform wrapper code that headers for internal classes (ResidualEchoDetector) are available.
+    #[cfg(feature = "bundled")]
+    cc_build.define("WEBRTC_HAS_INTERNAL_HEADERS", None);
+
+    cc_build.compile("webrtc_audio_processing_wrapper");
 
     // The the cc and bindgen commands emit `cargo:rerun-if-env-changed=...`, and these deactivate
     // the default behavior to rerun if _any_ source file changes. So state these explicitly.
@@ -439,7 +444,9 @@ fn main() -> Result<()> {
         .header("src/wrapper.hpp")
         .clang_args(&["-x", "c++", "-std=c++17", "-fparse-all-comments"])
         .generate_comments(true)
-        .enable_cxx_namespaces();
+        .enable_cxx_namespaces()
+        // Rust edition 2024 warns on usafe operations outside unsafe block, even in unsafe fns.
+        .wrap_unsafe_ops(true);
 
     builder = builder
         // Transitive dependencies are automatically included.
@@ -491,7 +498,9 @@ fn determine_objcopy_path() -> Result<PathBuf> {
     // Optional: verification
     if !objcopy.exists() {
         println!("cargo:warning=rust-objcopy not found at {:?}", objcopy);
-        println!("cargo:warning=Ensure the 'llvm-tools' component is installed: 'rustup component add llvm-tools'");
+        println!(
+            "cargo:warning=Ensure the 'llvm-tools' component is installed: 'rustup component add llvm-tools'"
+        );
     }
 
     Ok(objcopy)
